@@ -6,14 +6,13 @@
 #include <map>
 #include <iomanip>
 
+#include "CameraExtrinsicsIO.hpp"
 
 namespace fs = boost::filesystem;
 
 constexpr int MAX_VALID_ARGS = 3;
 
-
-
-auto printHelp (int argc, char **argv) -> void {
+auto printHelp (int argc, char ** argv) -> void {
   using pcl::console::print_error;
   using pcl::console::print_info;
 
@@ -24,7 +23,7 @@ auto printHelp (int argc, char **argv) -> void {
   print_info ("where x, y are the camera numbers (e.g. 12.yml).\n");
 }
 
-auto getTimedPcdFilesInPath(fs::path pcd_dir) -> std::multimap<double, fs::path> {
+auto getTimedPcdFilesInPath(fs::path const & pcd_dir) -> std::multimap<double, fs::path> {
   auto result_set = std::multimap<double, fs::path>{};
   for (auto const & entry : boost::make_iterator_range(fs::directory_iterator{pcd_dir})) {
     if (fs::is_regular_file(entry.status())) {
@@ -43,7 +42,19 @@ auto getTimedPcdFilesInPath(fs::path pcd_dir) -> std::multimap<double, fs::path>
       }
     }
   }
-  return result_set;
+  return std::move(result_set);
+}
+
+auto loadExtrinsics(std::vector<fs::path> const & file_paths) -> std::vector<Eigen::Matrix4f> {
+  auto result = std::vector<Eigen::Matrix4f>{};
+
+  for (auto const & path : file_paths) {
+    auto mat = Eigen::Matrix4f{};
+    if (CameraExtrinsicsIO::loadExtrinsics(path.string(), mat))
+      result.emplace_back(std::move(mat));
+  }
+
+  return result;
 }
 
 auto main (int argc, char** argv) -> int {
@@ -83,7 +94,7 @@ auto main (int argc, char** argv) -> int {
     }
   }
 
-  if (!fs::exists(current_dir) || !fs::is_directory(current_dir) ) {
+  if (!fs::exists(current_dir) || !fs::is_directory(current_dir)) {
     pcl::console::print_error("A valid directory was not specified.\n");
     printHelp(argc, argv);
     return -1;
@@ -109,6 +120,14 @@ auto main (int argc, char** argv) -> int {
   }
 
   std::sort(yml_files.begin(), yml_files.end());
+
+  auto RT_mats = loadExtrinsics(yml_files);
+  if (RT_mats.empty()) {
+    pcl::console::print_error("Failed to correctly load yml files.\n"
+                                  "Please ensure that the file contents are correct.\n");
+    printHelp(argc, argv);
+    return -1;
+  }
 
   auto source_dirs = std::vector<fs::path>{};
 
@@ -163,8 +182,18 @@ auto main (int argc, char** argv) -> int {
 
   auto target_set = getTimedPcdFilesInPath(target_dir);
 
-  for (auto const & p : target_set)
-    std::cout << p.first << " --- " << p.second << std::endl;
+  auto source_sets = std::vector<std::multimap<double, fs::path>>{};
+
+  for (auto const & dir : source_dirs) {
+    source_sets.emplace_back(getTimedPcdFilesInPath(dir));
+  }
+
+//  for (auto const & p : target_set)
+//    std::cout << std::setprecision(14) << p.first << " --- " << p.second << std::endl;
+//
+//  for (auto const & set : source_sets)
+//    for (auto const & p : set)
+//    std::cout << std::setprecision(14) << p.first << " --- " << p.second << std::endl;
 
   return 0;
 }

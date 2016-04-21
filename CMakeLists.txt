@@ -16,7 +16,7 @@ INCLUDE_DIRECTORIES(${Boost_INCLUDE_DIR})
 
 include_directories(${CMAKE_HOME_DIRECTORY}/include)
 
-set(SOURCE_FILES src/main.cpp)
+set(SOURCE_FILES src/main.cpp src/Logger.cpp src/CameraExtrinsicsIO.cpp)
 
 add_executable(pcl_pcd_recording_merger ${SOURCE_FILES})
 
