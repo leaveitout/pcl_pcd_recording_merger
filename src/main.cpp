@@ -5,6 +5,7 @@
 #include <boost/range/iterator_range.hpp>
 #include <map>
 #include <iomanip>
+#include <queue>
 
 #include "CameraExtrinsicsIO.hpp"
 
@@ -42,7 +43,7 @@ auto getTimedPcdFilesInPath(fs::path const & pcd_dir) -> std::multimap<double, f
       }
     }
   }
-  return std::move(result_set);
+  return result_set;
 }
 
 auto loadExtrinsics(std::vector<fs::path> const & file_paths) -> std::vector<Eigen::Matrix4f> {
@@ -55,6 +56,39 @@ auto loadExtrinsics(std::vector<fs::path> const & file_paths) -> std::vector<Eig
   }
 
   return result;
+}
+
+auto associateTimings(std::multimap<double, fs::path> const & target_set,
+                      std::vector<std::multimap<double, fs::path>> const & source_sets)
+    -> std::queue<std::vector<fs::path>> {
+
+  auto result_associated_paths = std::queue<std::vector<fs::path>>{};
+
+  for (auto const & target_path : target_set) {
+    auto merge_paths = std::vector<fs::path>{};
+    merge_paths.emplace_back(target_path.second);
+
+    for (auto const & source_set : source_sets) {
+      auto lower = source_set.lower_bound(target_path.first);
+
+      // Edge cases
+      if (lower == source_set.end()) {
+        merge_paths.emplace_back(source_set.rbegin()->second);
+      } else if (lower == source_set.begin()) {
+        merge_paths.emplace_back(lower->second);
+      } else {
+        auto prev = lower;
+        --prev;
+        if (target_path.first - prev->first < lower->first - target_path.first)
+          merge_paths.emplace_back(prev->second);
+        else
+          merge_paths.emplace_back(lower->second);
+      }
+    }
+    result_associated_paths.emplace(merge_paths);
+  }
+
+  return result_associated_paths;
 }
 
 auto main (int argc, char** argv) -> int {
@@ -188,12 +222,15 @@ auto main (int argc, char** argv) -> int {
     source_sets.emplace_back(getTimedPcdFilesInPath(dir));
   }
 
-//  for (auto const & p : target_set)
-//    std::cout << std::setprecision(14) << p.first << " --- " << p.second << std::endl;
-//
-//  for (auto const & set : source_sets)
-//    for (auto const & p : set)
-//    std::cout << std::setprecision(14) << p.first << " --- " << p.second << std::endl;
+  auto paths_to_merge = associateTimings(target_set, source_sets);
+
+  while (!paths_to_merge.empty()) {
+    auto merge_set = paths_to_merge.front();
+    for (auto const & path : merge_set)
+      std::cout << path.string() << std::endl;
+    std::cout << "----------------------------------------------------" << std::endl;
+    paths_to_merge.pop();
+  }
 
   return 0;
 }
