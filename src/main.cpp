@@ -6,12 +6,17 @@
 #include <map>
 #include <iomanip>
 #include <queue>
+#include <mutex>
+#include <Logger.hpp>
+#include <thread>
 
 #include "CameraExtrinsicsIO.hpp"
 
 namespace fs = boost::filesystem;
 
 constexpr int MAX_VALID_ARGS = 3;
+
+std::mutex queue_mutex;
 
 auto printHelp (int argc, char ** argv) -> void {
   using pcl::console::print_error;
@@ -24,7 +29,8 @@ auto printHelp (int argc, char ** argv) -> void {
   print_info ("where x, y are the camera numbers (e.g. 12.yml).\n");
 }
 
-auto getTimedPcdFilesInPath(fs::path const & pcd_dir) -> std::multimap<double, fs::path> {
+auto getTimedPcdFilesInPath(fs::path const & pcd_dir)
+    -> std::multimap<double, fs::path> {
   auto result_set = std::multimap<double, fs::path>{};
   for (auto const & entry : boost::make_iterator_range(fs::directory_iterator{pcd_dir})) {
     if (fs::is_regular_file(entry.status())) {
@@ -89,6 +95,43 @@ auto associateTimings(std::multimap<double, fs::path> const & target_set,
   }
 
   return result_associated_paths;
+}
+
+// Thread-safe queue access
+auto getFront(std::queue<std::vector<fs::path>> & paths_set_queue)
+    -> std::vector<fs::path> {
+  auto next_paths_set = std::vector<fs::path>{};
+  queue_mutex.lock();
+  if (!paths_set_queue.empty()) {
+    next_paths_set = paths_set_queue.front();
+    paths_set_queue.pop();
+  }
+  queue_mutex.unlock();
+  return next_paths_set;
+}
+
+auto mergeFiles(std::vector<fs::path> const & paths, bool smoothing) {
+  // Placeholder for testing
+  auto ss = std::stringstream{};
+
+  for (auto const & p : paths)
+    ss << p.string() << std::endl;
+
+  ss << "----------------------------------------------------------------------------" << std::endl;
+  Logger::log(Logger::INFO, ss.str());
+}
+
+auto merging_runner(std::queue<std::vector<fs::path>> & paths_set_queue, bool smoothing) {
+  auto merge_paths = getFront(paths_set_queue);
+
+  while(!merge_paths.empty()) {
+    mergeFiles(merge_paths, smoothing);
+    merge_paths = getFront(paths_set_queue);
+  }
+  auto ss = std::stringstream{};
+  ss << "Thread exiting : " << std::this_thread::get_id() << std::endl;
+  Logger::log(Logger::INFO, ss.str());
+  return true;
 }
 
 auto main (int argc, char** argv) -> int {
@@ -224,13 +267,18 @@ auto main (int argc, char** argv) -> int {
 
   auto paths_to_merge = associateTimings(target_set, source_sets);
 
-  while (!paths_to_merge.empty()) {
-    auto merge_set = paths_to_merge.front();
-    for (auto const & path : merge_set)
-      std::cout << path.string() << std::endl;
-    std::cout << "----------------------------------------------------" << std::endl;
-    paths_to_merge.pop();
+  auto runners = std::vector<std::shared_ptr<std::thread>>{};
+  std::cout << "Runners size " << runners.size() << std::endl;
+  auto num_threads_to_use = std::thread::hardware_concurrency();
+
+  for (auto i = 0u; i < num_threads_to_use; ++i) {
+    auto runner = std::make_shared<std::thread>(merging_runner, std::ref(paths_to_merge), mls);
+    runners.push_back(runner);
   }
+
+  for (auto i = 0u; i < runners.size(); ++i)
+    if(runners.at(i)->joinable())
+      runners.at(i)->join();
 
   return 0;
 }
