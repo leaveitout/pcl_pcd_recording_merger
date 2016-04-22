@@ -101,16 +101,20 @@ auto associateTimings(std::multimap<double, fs::path> const & target_set,
 auto getFront(std::queue<std::vector<fs::path>> & paths_set_queue)
     -> std::vector<fs::path> {
   auto next_paths_set = std::vector<fs::path>{};
-  queue_mutex.lock();
-  if (!paths_set_queue.empty()) {
-    next_paths_set = paths_set_queue.front();
-    paths_set_queue.pop();
+  {
+    std::lock_guard<std::mutex> lock{queue_mutex};
+    if (!paths_set_queue.empty()) {
+      next_paths_set = paths_set_queue.front();
+      paths_set_queue.pop();
+    }
   }
-  queue_mutex.unlock();
   return next_paths_set;
 }
 
-auto mergeFiles(std::vector<fs::path> const & paths, bool smoothing) {
+auto mergeFiles(std::vector<fs::path> const & paths,
+                fs::path const & target_dir,
+                std::vector<Eigen::Matrix4f> const RT_matrices,
+                bool smoothing = false) {
   // Placeholder for testing
   auto ss = std::stringstream{};
 
@@ -121,11 +125,17 @@ auto mergeFiles(std::vector<fs::path> const & paths, bool smoothing) {
   Logger::log(Logger::INFO, ss.str());
 }
 
-auto merging_runner(std::queue<std::vector<fs::path>> & paths_set_queue, bool smoothing) {
+auto merging_runner(std::queue<std::vector<fs::path>> & paths_set_queue,
+                    fs::path const target_dir,
+                    std::vector<Eigen::Matrix4f> const RT_matrices,
+                    bool smoothing) {
   auto merge_paths = getFront(paths_set_queue);
 
   while(!merge_paths.empty()) {
-    mergeFiles(merge_paths, smoothing);
+    mergeFiles(merge_paths,
+               target_dir,
+               RT_matrices,
+               smoothing);
     merge_paths = getFront(paths_set_queue);
   }
   auto ss = std::stringstream{};
@@ -272,7 +282,11 @@ auto main (int argc, char** argv) -> int {
   auto num_threads_to_use = std::thread::hardware_concurrency();
 
   for (auto i = 0u; i < num_threads_to_use; ++i) {
-    auto runner = std::make_shared<std::thread>(merging_runner, std::ref(paths_to_merge), mls);
+    auto runner = std::make_shared<std::thread>(merging_runner,
+                                                std::ref(paths_to_merge),
+                                                target_dir,
+                                                RT_mats,
+                                                mls);
     runners.push_back(runner);
   }
 
