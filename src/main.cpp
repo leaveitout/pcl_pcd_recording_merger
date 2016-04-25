@@ -1,5 +1,7 @@
 #include <pcl/console/print.h>
 #include <pcl/console/parse.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/common/transforms.h>
 #include <boost/filesystem.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/range/iterator_range.hpp>
@@ -9,6 +11,7 @@
 #include <mutex>
 #include <Logger.hpp>
 #include <thread>
+#include <boost/smart_ptr/make_shared.hpp>
 
 #include "CameraExtrinsicsIO.hpp"
 
@@ -106,34 +109,78 @@ auto getFront(std::queue<std::vector<fs::path>> & paths_set_queue)
     if (!paths_set_queue.empty()) {
       next_paths_set = paths_set_queue.front();
       paths_set_queue.pop();
+      if (paths_set_queue.size() % 10 == 0) {
+        auto ss = std::stringstream{};
+        ss << paths_set_queue.size() << " items remaining in queue." << std::endl;
+
+      }
     }
   }
   return next_paths_set;
 }
 
 auto mergeFiles(std::vector<fs::path> const & paths,
-                fs::path const & target_dir,
+                fs::path const & result_dir,
                 std::vector<Eigen::Matrix4f> const RT_matrices,
                 bool smoothing = false) {
-  // Placeholder for testing
   auto ss = std::stringstream{};
 
-  for (auto const & p : paths)
-    ss << p.string() << std::endl;
+  auto clouds = std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>{};
+  auto error = false;
 
-  ss << "----------------------------------------------------------------------------" << std::endl;
-  Logger::log(Logger::INFO, ss.str());
+  for (auto const & p : paths) {
+    auto cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBA>>();
+    if (pcl::io::loadPCDFile<pcl::PointXYZRGBA> (p.string(), *cloud) == -1) {
+      ss << "Failed to load: " << p.string() << std::endl;
+      error = true;
+    }
+    else {
+      ss << "Loaded: " << p.string() << std::endl;
+      clouds.push_back(cloud);
+    }
+  }
+
+  ss << "----------------------------------------------------------------------------"
+      << std::endl;
+
+  if(error)
+    Logger::log(Logger::ERROR, ss.str());
+  else {
+    auto result_cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBA>>();
+
+    // Add target cloud
+    *result_cloud += *(clouds.at(0));
+
+    // Add source clouds
+    auto index = 1ul;
+    for (auto const &RT : RT_matrices) {
+      auto target_cloud = clouds.at(index);
+      pcl::transformPointCloud(*target_cloud, *target_cloud, RT);
+      *result_cloud += *target_cloud;
+      ++index;
+    }
+
+    // Write to disk
+    auto result_file = result_dir / paths.at(0).filename();
+
+    pcl::io::savePCDFileBinaryCompressed(result_file.string(), *result_cloud);
+
+    ss << "Merged file: " << result_file.string() << std::endl;
+
+    Logger::log(Logger::INFO, ss.str());
+  }
+
 }
 
-auto merging_runner(std::queue<std::vector<fs::path>> & paths_set_queue,
-                    fs::path const target_dir,
-                    std::vector<Eigen::Matrix4f> const RT_matrices,
-                    bool smoothing) {
+auto mergingRunner(std::queue<std::vector<fs::path>> &paths_set_queue,
+                   fs::path const result_dir,
+                   std::vector<Eigen::Matrix4f> const RT_matrices,
+                   bool smoothing) {
   auto merge_paths = getFront(paths_set_queue);
 
   while(!merge_paths.empty()) {
     mergeFiles(merge_paths,
-               target_dir,
+               result_dir,
                RT_matrices,
                smoothing);
     merge_paths = getFront(paths_set_queue);
@@ -149,8 +196,8 @@ auto main (int argc, char** argv) -> int {
       "PCL PCD cloud merging using saved extrinsics. "
                        "See %s -h for options.\n", argv[0]);
 
-  auto help_flag_1 = pcl::console::find_switch (argc, argv, "-h");
-  auto help_flag_2 = pcl::console::find_switch (argc, argv, "--help");
+  auto help_flag_1 = pcl::console::find_switch(argc, argv, "-h");
+  auto help_flag_2 = pcl::console::find_switch(argc, argv, "--help");
 
   if (help_flag_1 || help_flag_2 || argc > MAX_VALID_ARGS) {
     printHelp (argc, argv);
@@ -257,8 +304,9 @@ auto main (int argc, char** argv) -> int {
   if (mls)
     ss << "-mls";
 
+  auto result_dir = current_dir / ss.str();
   try {
-    fs::create_directory(current_dir / ss.str());
+    fs::create_directory(result_dir);
   } catch(fs::filesystem_error e){
     pcl::console::print_error("Unable to create directories. "
                                   "Please ensure that the correct permissions are "
@@ -282,9 +330,9 @@ auto main (int argc, char** argv) -> int {
   auto num_threads_to_use = std::thread::hardware_concurrency();
 
   for (auto i = 0u; i < num_threads_to_use; ++i) {
-    auto runner = std::make_shared<std::thread>(merging_runner,
+    auto runner = std::make_shared<std::thread>(mergingRunner,
                                                 std::ref(paths_to_merge),
-                                                target_dir,
+                                                result_dir,
                                                 RT_mats,
                                                 mls);
     runners.push_back(runner);
