@@ -2,6 +2,8 @@
 #include <pcl/console/parse.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/common/transforms.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/surface/mls.h>
 #include <boost/filesystem.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/range/iterator_range.hpp>
@@ -143,7 +145,7 @@ auto mergeFiles(std::vector<fs::path> const & paths,
   ss << "----------------------------------------------------------------------------"
       << std::endl;
 
-  if(error)
+  if (error)
     Logger::log(Logger::ERROR, ss.str());
   else {
     auto result_cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBA>>();
@@ -158,6 +160,21 @@ auto mergeFiles(std::vector<fs::path> const & paths,
       pcl::transformPointCloud(*target_cloud, *target_cloud, RT);
       *result_cloud += *target_cloud;
       ++index;
+    }
+
+    if (smoothing) {
+      // Perform mls smoothing
+      auto tree = boost::make_shared<pcl::search::KdTree<pcl::PointXYZRGBA>>();
+      auto mls = pcl::MovingLeastSquares<pcl::PointXYZRGBA, pcl::PointXYZRGBA>{};
+      auto mls_points = pcl::PointCloud<pcl::PointXYZRGBA>{};
+
+      mls.setComputeNormals(true);
+      mls.setInputCloud(result_cloud);
+      mls.setPolynomialFit(true);
+      mls.setSearchMethod(tree);
+      // TODO: Add parameter for this value (3cm)
+      mls.setSearchRadius(0.03);
+      mls.process(mls_points);
     }
 
     // Write to disk
