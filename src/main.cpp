@@ -343,7 +343,6 @@ auto main (int argc, char** argv) -> int {
   auto paths_to_merge = associateTimings(target_set, source_sets);
 
   auto runners = std::vector<std::shared_ptr<std::thread>>{};
-  std::cout << "Runners size " << runners.size() << std::endl;
   auto num_threads_to_use = std::thread::hardware_concurrency();
 
   for (auto i = 0u; i < num_threads_to_use; ++i) {
