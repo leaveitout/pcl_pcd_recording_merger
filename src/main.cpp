@@ -173,7 +173,7 @@ auto mergeFiles(std::vector<fs::path> const & paths,
       mls.setPolynomialFit(true);
       mls.setSearchMethod(tree);
       // TODO: Add parameter for this value (3cm)
-      mls.setSearchRadius(0.03);
+      mls.setSearchRadius(0.015);
       mls.process(mls_points);
     }
 
