@@ -81,4 +81,5 @@ crashlytics-build.properties
 
 ### Project Specific
 /bin
+/cmake-*
 
