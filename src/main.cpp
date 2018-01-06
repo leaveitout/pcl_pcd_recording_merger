@@ -1,6 +1,9 @@
 #include <pcl/console/print.h>
 #include <pcl/console/parse.h>
 #include <pcl/io/pcd_io.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/eigen.h>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/surface/mls.h>
@@ -14,6 +17,7 @@
 #include <Logger.hpp>
 #include <thread>
 #include <boost/smart_ptr/make_shared.hpp>
+#include <Eigen/StdVector>
 
 #include "CameraExtrinsicsIO.hpp"
 
@@ -57,8 +61,8 @@ auto getTimedPcdFilesInPath(fs::path const & pcd_dir)
   return result_set;
 }
 
-auto loadExtrinsics(std::vector<fs::path> const & file_paths) -> std::vector<Eigen::Matrix4f> {
-  auto result = std::vector<Eigen::Matrix4f>{};
+auto loadExtrinsics(std::vector<fs::path> const & file_paths) -> std::vector<Eigen::Matrix4f, Eigen::aligned_allocator <Eigen::Matrix4f>> {
+  auto result = std::vector<Eigen::Matrix4f, Eigen::aligned_allocator <Eigen::Matrix4f>>{};
 
   for (auto const & path : file_paths) {
     auto mat = Eigen::Matrix4f{};
@@ -105,30 +109,29 @@ auto associateTimings(std::multimap<double, fs::path> const & target_set,
 // Thread-safe queue access
 auto getFront(std::queue<std::vector<fs::path>> & paths_set_queue)
     -> std::vector<fs::path> {
+  std::lock_guard<std::mutex> lock{queue_mutex};
   auto next_paths_set = std::vector<fs::path>{};
-  {
-    std::lock_guard<std::mutex> lock{queue_mutex};
-    if (!paths_set_queue.empty()) {
-      next_paths_set = paths_set_queue.front();
-      paths_set_queue.pop();
-      if (paths_set_queue.size() % 10 == 0) {
-        auto ss = std::stringstream{};
-        ss << paths_set_queue.size() << " items remaining in queue." << std::endl;
 
-      }
-    }
+  if (!paths_set_queue.empty()) {
+    next_paths_set = paths_set_queue.front();
+    paths_set_queue.pop();
   }
   return next_paths_set;
 }
 
 auto mergeFiles(std::vector<fs::path> const & paths,
                 fs::path const & result_dir,
-                std::vector<Eigen::Matrix4f> const RT_matrices,
-                bool smoothing = false) {
+                std::vector<Eigen::Affine3f, Eigen::aligned_allocator <Eigen::Affine3f>> const RT_matrices,
+                bool smoothing = false) -> void {
   auto ss = std::stringstream{};
 
   auto clouds = std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>{};
   auto error = false;
+
+  if (paths.empty()) {
+      ss << "Paths to merge empty" << std::endl;
+      error = true;
+  }
 
   for (auto const & p : paths) {
     auto cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBA>>();
@@ -142,31 +145,41 @@ auto mergeFiles(std::vector<fs::path> const & paths,
     }
   }
 
+  if (clouds.size() != 3) {
+      ss << "Clouds size is not 3 " << clouds.size() << std::endl;
+      error = true;
+  }
+
   ss << "----------------------------------------------------------------------------"
       << std::endl;
 
   if (error)
     Logger::log(Logger::ERROR, ss.str());
   else {
+    Logger::log(Logger::INFO, ss.str());
+
     auto result_cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGBA>>();
 
     // Add target cloud
     *result_cloud += *(clouds.at(0));
-
+    
     // Add source clouds
-    auto index = 1ul;
+    auto index = 1;
     for (auto const &RT : RT_matrices) {
       auto target_cloud = clouds.at(index);
-      pcl::transformPointCloud(*target_cloud, *target_cloud, RT);
-      *result_cloud += *target_cloud;
+      auto transformed_cloud = boost::make_shared <pcl::PointCloud <pcl::PointXYZRGBA>> ();
+      pcl::transformPointCloud <pcl::PointXYZRGBA, float> (*target_cloud, *transformed_cloud, RT);
+
+      *result_cloud += *transformed_cloud;
       ++index;
     }
+
 
     if (smoothing) {
       // Perform mls smoothing
       auto tree = boost::make_shared<pcl::search::KdTree<pcl::PointXYZRGBA>>();
       auto mls = pcl::MovingLeastSquares<pcl::PointXYZRGBA, pcl::PointXYZRGBA>{};
-      auto mls_points = pcl::PointCloud<pcl::PointXYZRGBA>{};
+      auto mls_points = boost::make_shared <pcl::PointCloud<pcl::PointXYZRGBA>> ();
 
       mls.setComputeNormals(true);
       mls.setInputCloud(result_cloud);
@@ -174,26 +187,25 @@ auto mergeFiles(std::vector<fs::path> const & paths,
       mls.setSearchMethod(tree);
       mls.setPolynomialOrder (2);
       // TODO: Add parameter for this value (3cm)
-      mls.setSearchRadius(0.015);
-      mls.process(mls_points);
+      mls.setSearchRadius(0.01);
+      mls.process(*mls_points);
+      result_cloud = mls_points;
     }
 
     // Write to disk
     auto result_file = result_dir / paths.at(0).filename();
 
     pcl::io::savePCDFileBinaryCompressed(result_file.string(), *result_cloud);
-
-    ss << "Merged file: " << result_file.string() << std::endl;
-
+    auto ss_final = std::stringstream {};
+    ss << "Wrote file to disk: " << result_file << std::endl;
     Logger::log(Logger::INFO, ss.str());
   }
-
 }
 
 auto mergingRunner(std::queue<std::vector<fs::path>> &paths_set_queue,
                    fs::path const result_dir,
-                   std::vector<Eigen::Matrix4f> const RT_matrices,
-                   bool smoothing) {
+                   std::vector<Eigen::Affine3f, Eigen::aligned_allocator <Eigen::Affine3f>> const RT_matrices,
+                   bool smoothing) -> bool {
   auto merge_paths = getFront(paths_set_queue);
 
   while(!merge_paths.empty()) {
@@ -273,12 +285,19 @@ auto main (int argc, char** argv) -> int {
 
   std::sort(yml_files.begin(), yml_files.end());
 
-  auto RT_mats = loadExtrinsics(yml_files);
-  if (RT_mats.empty()) {
+  auto RT_mats_44 = loadExtrinsics(yml_files);
+  if (RT_mats_44.empty()) {
     pcl::console::print_error("Failed to correctly load yml files.\n"
                                   "Please ensure that the file contents are correct.\n");
     printHelp(argc, argv);
     return -1;
+  }
+
+  std::vector <Eigen::Affine3f, Eigen::aligned_allocator <Eigen::Affine3f>> RT_mats;
+  for (auto const & RT_mat_44 : RT_mats_44) {
+    Eigen::Transform <float, 3, Eigen::Affine> transform;
+    transform.matrix() = RT_mat_44;
+    RT_mats.push_back (transform);
   }
 
   auto source_dirs = std::vector<fs::path>{};
@@ -299,7 +318,12 @@ auto main (int argc, char** argv) -> int {
     source_dirs.push_back(current_dir / d.filename().string().substr(0,1));
   }
 
+  for (auto const & d : source_dirs) {
+    std::cout << d << std::endl;
+  }
+
   auto target_dir = current_dir / std::to_string(target_num);
+  std::cout << target_dir << std::endl;
 
   auto valid_target_dir = fs::exists(target_dir) && fs::is_directory(target_dir);
 
@@ -333,6 +357,8 @@ auto main (int argc, char** argv) -> int {
     return -1;
   }
 
+  std::cout << "Results dir: " << result_dir << std::endl;
+
   auto target_set = getTimedPcdFilesInPath(target_dir);
 
   auto source_sets = std::vector<std::multimap<double, fs::path>>{};
@@ -341,7 +367,11 @@ auto main (int argc, char** argv) -> int {
     source_sets.emplace_back(getTimedPcdFilesInPath(dir));
   }
 
+  std::cout << "Associating timings..." << std::endl;
+
   auto paths_to_merge = associateTimings(target_set, source_sets);
+
+  std::cout << "Done." << std::endl;
 
   auto runners = std::vector<std::shared_ptr<std::thread>>{};
   auto num_threads_to_use = std::thread::hardware_concurrency();
@@ -354,6 +384,8 @@ auto main (int argc, char** argv) -> int {
                                                 mls);
     runners.push_back(runner);
   }
+
+  std::cout << "Starting threads." << std::endl;
 
   for (auto i = 0u; i < runners.size(); ++i)
     if(runners.at(i)->joinable())
